@@ -12,9 +12,9 @@ use datafusion::{
         record_batch::RecordBatch,
     },
     error::{DataFusionError, Result},
-    physical_plan::{RecordBatchStream, SendableRecordBatchStream},
+    physical_plan::{stream::RecordBatchStreamAdapter, EmptyRecordBatchStream, RecordBatchStream, SendableRecordBatchStream},
 };
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use std::{
     sync::Arc,
     task::{Context, Poll},
@@ -27,8 +27,8 @@ pub type SQLExecutorRef = Arc<dyn SQLExecutor>;
 pub trait SQLExecutor: Sync + Send {
     fn name(&self) -> &str;
     fn compute_context(&self) -> Option<String>;
-    // async since many query libraries will be async
-    async fn execute(&self, query: &str) -> Result<SendableRecordBatchStream>;
+    // Can use futures::stream::try_unfold to return async stream in sync function
+    fn execute(&self, query: &str) -> Result<SendableRecordBatchStream>;
 }
 
 impl fmt::Debug for dyn SQLExecutor {
@@ -79,17 +79,25 @@ impl SQLExecutor for CXExecutor {
     fn compute_context(&self) -> Option<String> {
         Some(self.context.clone())
     }
-    async fn execute(&self, sql: &str) -> Result<SendableRecordBatchStream> {
+    fn execute(&self, sql: &str) -> Result<SendableRecordBatchStream> {
         let conn = self.conn.clone();
         let query: CXQuery = sql.into();
+        //debug!("CXExecutor Executing SQL: {}", sql);
 
-        let dst = task::spawn_blocking(move || {
-            get_arrow(&conn, None, &[query]).map_err(cx_out_error_to_df)
-        })
-        .await
-        .map_err(join_error_to_df)??;
 
-        Ok(Box::pin(ArrowDestinationStream(dst)))
+        let mut dst = get_arrow(&conn, None, &[query.clone()]).map_err(cx_out_error_to_df)?;
+        let stream = if let Some(batch) = dst.record_batch().map_err(cx_dst_error_to_df)?{
+            futures::stream::once(async move {Ok(batch)})
+        } else{
+            return Ok(Box::pin(EmptyRecordBatchStream::new(Arc::new(Schema::empty()))))
+        };
+
+        let schema = schema_to_lowercase(dst.arrow_schema());
+        
+        Ok(Box::pin(RecordBatchStreamAdapter::new(
+            schema,
+            stream,
+        )))
     }
 }
 
@@ -118,27 +126,25 @@ fn cx_dst_error_to_df(err: ArrowDestinationError) -> DataFusionError {
     DataFusionError::External(format!("ConnectorX failed to run query: {err:?}").into())
 }
 
-impl RecordBatchStream for ArrowDestinationStream {
-    /// Get the schema
-    fn schema(&self) -> SchemaRef {
-        let schema = self.0.arrow_schema();
+/// Get the schema with lowercase field names
+fn schema_to_lowercase(schema: SchemaRef) -> SchemaRef {
 
-        // DF needs lower case schema
-        let lower_fields: Vec<_> = schema
-            .fields
-            .iter()
-            .map(|f| {
-                Field::new(
-                    f.name().to_ascii_lowercase(),
-                    f.data_type().clone(),
-                    f.is_nullable(),
-                )
-            })
-            .collect();
+    // DF needs lower case schema
+    let lower_fields: Vec<_> = schema
+        .fields
+        .iter()
+        .map(|f| {
+            Field::new(
+                f.name().to_ascii_lowercase(),
+                f.data_type().clone(),
+                f.is_nullable(),
+            )
+        })
+        .collect();
 
-        Arc::new(Schema::new(lower_fields))
-    }
+    Arc::new(Schema::new(lower_fields))
 }
+
 
 fn cx_out_error_to_df(err: ConnectorXOutError) -> DataFusionError {
     DataFusionError::External(format!("ConnectorX failed to run query: {err:?}").into())

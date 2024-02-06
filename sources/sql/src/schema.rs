@@ -77,7 +77,7 @@ impl SQLTableSource {
             .clone()
             .executor
             .execute(query.as_str())
-            .await?
+            ?
             .schema();
 
         Self::new_with_schema(provider, table_name, schema)

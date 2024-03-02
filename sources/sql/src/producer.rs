@@ -632,13 +632,13 @@ mod tests {
         ];
 
         for (query, expected) in tests {
-            // let dialect = GenericDialect {};
+            let dialect: Arc<dyn Dialect> = Arc::new(GenericDialect {});
             // let orig_ast = Parser::parse_sql(&dialect, query).unwrap();
             // println!("{}", orig_ast[0]);
             let plan = ctx.sql(query).await.unwrap().into_unoptimized_plan();
             // println!("{:?}", plan);
 
-            let ast = query_to_sql(&plan);
+            let ast = query_to_sql(&plan, dialect);
             // println!("{:?}", ast);
 
             assert!(ast.is_ok());

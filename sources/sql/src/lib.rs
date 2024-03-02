@@ -25,7 +25,7 @@ pub use executor::*;
 // extern crate derive_builder;
 
 mod producer;
-use producer::query_to_sql;
+pub use producer::query_to_sql;
 
 mod ast_builder;
 
